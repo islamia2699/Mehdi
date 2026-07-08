@@ -15,6 +15,10 @@ input int    InpTrailingStopPoints = 100;   // Distance to follow behind price i
 input int    InpMinBosPoints       = 30;     // Minimum points breakout confirmation over the swing line
 input int    InpMaxSpreadPoints    = 50;     // Maximum allowed spread in points for entry
 input int    InpMaxSlippage        = 3;      // Maximum allowed slippage in points
+input bool   InpAllowHedging       = true;   // Enable simultaneous Buy and Sell positions
+input int    InpMaxBuyPositions    = 1;      // Max concurrent Buy positions
+input int    InpMaxSellPositions   = 1;      // Max concurrent Sell positions
+input int    InpMinDistancePoints  = 200;    // Min distance in points between trades of same direction
 
 //--- ACTIVE SYSTEM UPDATES
 input uint   InpMagicNumber       = 88123;  // Magic Number to separate EA trades
@@ -191,15 +195,29 @@ void OnTick()
 
    if(!IsNewBar()) return;
 
-   int activePositionsCount = 0;
+   int buyCount = 0, sellCount = 0;
+   double lastBuyPrice = 0, lastSellPrice = 0;
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
-      if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
         {
-         activePositionsCount++;
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+           {
+            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+              {
+               buyCount++;
+               lastBuyPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+              }
+            else if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+              {
+               sellCount++;
+               lastSellPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+              }
+           }
         }
      }
-   if(activePositionsCount > 0) return;
 
    //--- SMC SWING STRUCTURE IDENTIFICATION ENGINE
    double structureHigh = 0;
@@ -262,6 +280,8 @@ void OnTick()
    int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    double minDistance = (stopLevel + 10) * _Point;
    double calculatedLot = CalculateDynamicLot();
+   double askPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
    //--- Dynamic Point Value Calculation based on Lot Size for $50 Fixed Loss
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -288,7 +308,11 @@ void OnTick()
    double bullishBreakoutDistance = lastClose - structureHigh;
    double minRequiredBullishDistance = (InpMinBosPoints + currentSpreadPoints) * _Point;
 
-   if(lastClose > structureHigh && entryAllowed)
+   bool buyLimitReached = (buyCount >= InpMaxBuyPositions);
+   bool buyDistanceOk = (buyCount == 0 || (askPrice - lastBuyPrice >= InpMinDistancePoints * _Point));
+   bool hedgeOkBuy = (sellCount == 0 || InpAllowHedging);
+
+   if(lastClose > structureHigh && entryAllowed && !buyLimitReached && buyDistanceOk && hedgeOkBuy)
      {
       if(bullishBreakoutDistance < minRequiredBullishDistance)
         {
@@ -301,8 +325,6 @@ void OnTick()
         }
       else
         {
-         double askPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
       // Fixed $50 risk based SL
       double calculatedSL = askPrice - (fixedLossPoints * _Point);
 
@@ -328,7 +350,11 @@ void OnTick()
    double bearishBreakoutDistance = structureLow - lastClose;
    double minRequiredBearishDistance = (InpMinBosPoints + currentSpreadPoints) * _Point;
 
-   if(lastClose < structureLow && entryAllowed)
+   bool sellLimitReached = (sellCount >= InpMaxSellPositions);
+   bool sellDistanceOk = (sellCount == 0 || (lastSellPrice - bidPrice >= InpMinDistancePoints * _Point));
+   bool hedgeOkSell = (buyCount == 0 || InpAllowHedging);
+
+   if(lastClose < structureLow && entryAllowed && !sellLimitReached && sellDistanceOk && hedgeOkSell)
      {
       if(bearishBreakoutDistance < minRequiredBearishDistance)
         {
@@ -341,8 +367,6 @@ void OnTick()
         }
       else
         {
-         double bidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
       // Fixed $50 risk based SL
       double calculatedSL = bidPrice + (fixedLossPoints * _Point);
 
@@ -384,8 +408,9 @@ bool IsNewBar()
 //+------------------------------------------------------------------+
 void ManagePositions()
   {
-   double displaySL = 0;
-   double displayTP = 0;
+   double totalOpenSL = 0;
+   double totalOpenTP = 0;
+   int relevantPositions = 0;
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -394,12 +419,13 @@ void ManagePositions()
         {
          if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
+         relevantPositions++;
          double current_profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
          long type         = PositionGetInteger(POSITION_TYPE);
          double current_sl = PositionGetDouble(POSITION_SL);
          double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-         displayTP        = PositionGetDouble(POSITION_TP);
-         displaySL        = current_sl;
+         totalOpenTP      += PositionGetDouble(POSITION_TP);
+         totalOpenSL      += current_sl;
 
          //--- EMERGENCY HARD LOSS PROTECTION (Account Equity Level Check)
          if(InpMaxEmergencyLoss > 0 && current_profit <= -InpMaxEmergencyLoss)
@@ -420,7 +446,7 @@ void ManagePositions()
                   double new_sl = NormalizeDouble(bid - InpTrailingStopPoints * _Point, _Digits);
                   if(new_sl > current_sl || current_sl == 0)
                     {
-                     if(trade.PositionModify(ticket, new_sl, 0)) displaySL = new_sl;
+                     trade.PositionModify(ticket, new_sl, 0);
                     }
                  }
               }
@@ -432,14 +458,17 @@ void ManagePositions()
                   double new_sl = NormalizeDouble(ask + InpTrailingStopPoints * _Point, _Digits);
                   if(new_sl < current_sl || current_sl == 0)
                     {
-                     if(trade.PositionModify(ticket, new_sl, 0)) displaySL = new_sl;
+                     trade.PositionModify(ticket, new_sl, 0);
                     }
                  }
               }
            }
         }
      }
-   UpdateDashboard(displaySL, displayTP);
+
+   double avgSL = (relevantPositions > 0) ? totalOpenSL / relevantPositions : 0;
+   double avgTP = (relevantPositions > 0) ? totalOpenTP / relevantPositions : 0;
+   UpdateDashboard(avgSL, avgTP);
   }
 
 //+------------------------------------------------------------------+
@@ -462,12 +491,14 @@ void DrawBOSLine(string prefix, datetime currTime, datetime structTime, double p
 //+------------------------------------------------------------------+
 void UpdateDashboard(double sl, double tp)
   {
-   int totalOpenTrades = 0;
+   int totalOpenTrades = 0, buys = 0, sells = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
         {
          totalOpenTrades++;
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) buys++;
+         else if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL) sells++;
         }
      }
 
@@ -560,7 +591,7 @@ void UpdateDashboard(double sl, double tp)
    color statusColor = (licenseStatusText == "Expired! Enter Key." || licenseStatusText == "Sub Expired! Renew.") ? clrRed : ((StringFind(licenseStatusText, "Paid") >= 0) ? clrCyan : clrOrange);
    CreateLabelObject("BOS_DB_License", startX + 10, startY + 10 + (rowHeight * 1), 0, 0, statusColor, fontSize, font, false, "Status: " + licenseStatusText);
    CreateLabelObject("BOS_DB_StartBal", startX + 10, startY + 10 + (rowHeight * 2), 0, 0, labelColor, fontSize, font, false, "Start Balance: $" + DoubleToString(initialBalance, 2));
-   CreateLabelObject("BOS_DB_Open", startX + 10, startY + 10 + (rowHeight * 3), 0, 0, labelColor, fontSize, font, false, "Open Trades: " + IntegerToString(totalOpenTrades));
+   CreateLabelObject("BOS_DB_Open", startX + 10, startY + 10 + (rowHeight * 3), 0, 0, labelColor, fontSize, font, false, "Open (B/S): " + IntegerToString(buys) + " / " + IntegerToString(sells));
    CreateLabelObject("BOS_DB_TotalProfit", startX + 10, startY + 10 + (rowHeight * 4), 0, 0, clrLime, fontSize, font, false, "Total Profit: $" + DoubleToString(totalProfit, 2));
    CreateLabelObject("BOS_DB_TotalLoss", startX + 10, startY + 10 + (rowHeight * 5), 0, 0, clrRed, fontSize, font, false, "Total Loss: $" + DoubleToString(totalLoss, 2));
    CreateLabelObject("BOS_DB_NetProfit", startX + 10, startY + 10 + (rowHeight * 6), 0, 0, netProfitColor, fontSize, font, false, "Net Profit: $" + DoubleToString(netProfit, 2));
