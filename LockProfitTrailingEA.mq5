@@ -32,6 +32,12 @@ input int      InpMaxSlippage       = 3;         // Maximum allowed slippage in 
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+     {
+      Alert("EA Error: This EA requires a HEDGING account. Current account is NETTING.");
+      return(INIT_FAILED);
+     }
+
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpMaxSlippage);
    return(INIT_SUCCEEDED);
@@ -42,9 +48,16 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   static string lastReason = "None";
    MqlTick lastTick;
-   if(!SymbolInfoTick(_Symbol, lastTick)) return;
+   if(!SymbolInfoTick(_Symbol, lastTick))
+     {
+      lastReason = "Failed to get Tick";
+      UpdateStatusComment(lastReason, 0, 0, 0);
+      return;
+     }
 
+   int currentSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    int totalBuyPositions = 0;
    int totalSellPositions = 0;
    double firstBuyPrice = 0;
@@ -145,28 +158,39 @@ void OnTick()
    {
       Print("Emergency Dollar SL reached: $", totalProfit, ". Hard close triggered.");
       CloseAllEAPositions();
+      lastReason = "Emergency SL hit";
+      UpdateStatusComment(lastReason, currentSpread, totalBuyPositions, totalSellPositions);
       return;
    }
 
-   // --- SPREAD FILTER (Only for NEW entries or hedging) ---
-   int currentSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   // 4. Spread Filter for NEW entries
    if(currentSpread > InpMaxSpread)
      {
+      lastReason = "Spread too high (" + IntegerToString(currentSpread) + ")";
       static datetime lastSpreadLog = 0;
       if(TimeCurrent() - lastSpreadLog > 60)
         {
          Print("New trade operations skipped: Current spread (", currentSpread, ") exceeds maximum (", InpMaxSpread, ")");
          lastSpreadLog = TimeCurrent();
         }
+      UpdateStatusComment(lastReason, currentSpread, totalBuyPositions, totalSellPositions);
       return;
      }
+
+   // 5. Entry Logic
+   lastReason = "Searching for signal...";
+   UpdateStatusComment(lastReason, currentSpread, totalBuyPositions, totalSellPositions);
 
    // CASE 1: Koi trade open nahi hai -> Start Fresh
    if(totalBuyPositions == 0 && totalSellPositions == 0)
    {
       double primaryLot = NormalizeVolume(InpInitialLot);
-      if(!trade.Buy(primaryLot, _Symbol, lastTick.ask, 0, 0, "Primary Buy"))
-        Print("Error opening primary Buy: ", trade.ResultRetcodeDescription());
+      if(primaryLot > 0)
+        {
+         if(!trade.Buy(primaryLot, _Symbol, lastTick.ask, 0, 0, "Primary Buy"))
+           Print("Error opening primary Buy: ", trade.ResultRetcodeDescription());
+        }
+      else Print("Error: Primary volume normalized to 0");
       return;
    }
 
@@ -176,8 +200,12 @@ void OnTick()
       if(firstBuyPrice - lastTick.bid >= InpHedgeDistance * _Point)
       {
          double hedgeLot = NormalizeVolume(InpInitialLot * InpHedgeLotMultiplier);
-         if(!trade.Sell(hedgeLot, _Symbol, lastTick.bid, 0, 0, "Support Sell"))
-           Print("Error opening support Sell: ", trade.ResultRetcodeDescription());
+         if(hedgeLot > 0)
+           {
+            if(!trade.Sell(hedgeLot, _Symbol, lastTick.bid, 0, 0, "Support Sell"))
+              Print("Error opening support Sell: ", trade.ResultRetcodeDescription());
+           }
+         else Print("Error: Hedge Sell volume normalized to 0");
       }
    }
 
@@ -187,8 +215,12 @@ void OnTick()
       if(lastTick.ask - firstSellPrice >= InpHedgeDistance * _Point)
       {
          double hedgeLot = NormalizeVolume(InpInitialLot * InpHedgeLotMultiplier);
-         if(!trade.Buy(hedgeLot, _Symbol, lastTick.ask, 0, 0, "Support Buy"))
-           Print("Error opening support Buy: ", trade.ResultRetcodeDescription());
+         if(hedgeLot > 0)
+           {
+            if(!trade.Buy(hedgeLot, _Symbol, lastTick.ask, 0, 0, "Support Buy"))
+              Print("Error opening support Buy: ", trade.ResultRetcodeDescription());
+           }
+         else Print("Error: Hedge Buy volume normalized to 0");
       }
    }
 }
@@ -206,7 +238,7 @@ double NormalizeVolume(double volume)
    if(volStep > 0) digits = (int)MathMax(0, -MathLog10(volStep));
 
    double normalized = MathRound(volume / volStep) * volStep;
-   if(normalized < minVol) normalized = minVol;
+   if(normalized < minVol) normalized = 0; // Skip if less than minimum allowed
    if(normalized > maxVol) normalized = maxVol;
 
    return NormalizeDouble(normalized, digits);
@@ -228,6 +260,20 @@ void ClosePositionsByType(ENUM_POSITION_TYPE posType)
          }
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| Dashboard Status Update                                          |
+//+------------------------------------------------------------------+
+void UpdateStatusComment(string reason, int spread, int buys, int sells)
+{
+   string marginMode = (AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING) ? "HEDGING" : "NETTING";
+   string text = "--- LockProfitTrailingEA Status ---\n" +
+                 "Account Type: " + marginMode + "\n" +
+                 "Current Spread: " + IntegerToString(spread) + " (Max: " + IntegerToString(InpMaxSpread) + ")\n" +
+                 "Open Positions: Buy: " + IntegerToString(buys) + " / Sell: " + IntegerToString(sells) + "\n" +
+                 "Last Activity: " + reason;
+   Comment(text);
 }
 
 //+------------------------------------------------------------------+

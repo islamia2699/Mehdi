@@ -179,7 +179,10 @@ void OnTick()
       return;
      }
 
-   ManagePositions();
+   MqlTick lastTick;
+   if(!SymbolInfoTick(_Symbol, lastTick)) return;
+
+   ManagePositions(lastTick);
 
    int currentSpreadPoints = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(currentSpreadPoints > InpMaxSpreadPoints)
@@ -280,8 +283,8 @@ void OnTick()
    int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    double minDistance = (stopLevel + 10) * _Point;
    double calculatedLot = CalculateDynamicLot();
-   double askPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double askPrice = lastTick.ask;
+   double bidPrice = lastTick.bid;
 
    //--- Dynamic Point Value Calculation based on Lot Size for $50 Fixed Loss
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -416,7 +419,7 @@ bool IsNewBar()
 //+------------------------------------------------------------------+
 //| Position Management with Dynamic Trailing & Loss Control          |
 //+------------------------------------------------------------------+
-void ManagePositions()
+void ManagePositions(const MqlTick &lastTick)
   {
    double totalOpenSL = 0;
    double totalOpenTP = 0;
@@ -450,7 +453,7 @@ void ManagePositions()
            {
             if(type == POSITION_TYPE_BUY)
               {
-               double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                  double bid = lastTick.bid;
                if(bid >= open_price + (InpTrailingStartPoints * _Point) || current_profit >= InpTargetProfit)
                  {
                   double new_sl = NormalizeDouble(bid - InpTrailingStopPoints * _Point, _Digits);
@@ -469,7 +472,7 @@ void ManagePositions()
               }
             else if(type == POSITION_TYPE_SELL)
               {
-               double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                  double ask = lastTick.ask;
                if(ask <= open_price - (InpTrailingStartPoints * _Point) || current_profit >= InpTargetProfit)
                  {
                   double new_sl = NormalizeDouble(ask + InpTrailingStopPoints * _Point, _Digits);
