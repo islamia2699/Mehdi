@@ -337,9 +337,14 @@ void OnTick()
 
       calculatedSL = NormalizeDouble(calculatedSL, _Digits);
 
-         if(trade.Buy(calculatedLot, _Symbol, 0, calculatedSL, 0, "SMC Bullish BOS"))
+         double finalLot = NormalizeVolume(calculatedLot);
+         if(!trade.Buy(finalLot, _Symbol, 0, calculatedSL, 0, "SMC Bullish BOS"))
            {
-            Print("True SMC Bullish BOS Confirmed. Lot: ", calculatedLot, " SL Set at: ", calculatedSL);
+            Print("Error opening SMC Bullish BOS: ", trade.ResultRetcodeDescription());
+           }
+         else
+           {
+            Print("True SMC Bullish BOS Confirmed. Lot: ", finalLot, " SL Set at: ", calculatedSL);
             DrawBOSLine("BOS_Bull_", currentCandleTime, structureHighTime, structureHigh);
             entryAllowed = false;
            }
@@ -379,9 +384,14 @@ void OnTick()
 
       calculatedSL = NormalizeDouble(calculatedSL, _Digits);
 
-         if(trade.Sell(calculatedLot, _Symbol, 0, calculatedSL, 0, "SMC Bearish BOS"))
+         double finalLot = NormalizeVolume(calculatedLot);
+         if(!trade.Sell(finalLot, _Symbol, 0, calculatedSL, 0, "SMC Bearish BOS"))
            {
-            Print("True SMC Bearish BOS Confirmed. Lot: ", calculatedLot, " SL Set at: ", calculatedSL);
+            Print("Error opening SMC Bearish BOS: ", trade.ResultRetcodeDescription());
+           }
+         else
+           {
+            Print("True SMC Bearish BOS Confirmed. Lot: ", finalLot, " SL Set at: ", calculatedSL);
             DrawBOSLine("BOS_Bear_", currentCandleTime, structureLowTime, structureLow);
             entryAllowed = false;
            }
@@ -444,9 +454,16 @@ void ManagePositions()
                if(bid >= open_price + (InpTrailingStartPoints * _Point) || current_profit >= InpTargetProfit)
                  {
                   double new_sl = NormalizeDouble(bid - InpTrailingStopPoints * _Point, _Digits);
+
+                  // Respect broker SYMBOL_TRADE_STOPS_LEVEL
+                  int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+                  double minDistance = (stopLevel + 2) * _Point;
+                  if(bid - new_sl < minDistance) new_sl = NormalizeDouble(bid - minDistance, _Digits);
+
                   if(new_sl > current_sl || current_sl == 0)
                     {
-                     trade.PositionModify(ticket, new_sl, 0);
+                     if(!trade.PositionModify(ticket, new_sl, 0))
+                       Print("Error modifying Buy SL: ", trade.ResultRetcodeDescription());
                     }
                  }
               }
@@ -456,9 +473,16 @@ void ManagePositions()
                if(ask <= open_price - (InpTrailingStartPoints * _Point) || current_profit >= InpTargetProfit)
                  {
                   double new_sl = NormalizeDouble(ask + InpTrailingStopPoints * _Point, _Digits);
+
+                  // Respect broker SYMBOL_TRADE_STOPS_LEVEL
+                  int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+                  double minDistance = (stopLevel + 2) * _Point;
+                  if(new_sl - ask < minDistance) new_sl = NormalizeDouble(ask + minDistance, _Digits);
+
                   if(new_sl < current_sl || current_sl == 0)
                     {
-                     trade.PositionModify(ticket, new_sl, 0);
+                     if(!trade.PositionModify(ticket, new_sl, 0))
+                       Print("Error modifying Sell SL: ", trade.ResultRetcodeDescription());
                     }
                  }
               }
@@ -604,6 +628,25 @@ void UpdateDashboard(double sl, double tp)
 
    ChartRedraw(0);
   }
+
+//+------------------------------------------------------------------+
+//| Volume normalization to comply with broker constraints           |
+//+------------------------------------------------------------------+
+double NormalizeVolume(double volume)
+{
+   double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double volStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   int digits = 0;
+   if(volStep > 0) digits = (int)MathMax(0, -MathLog10(volStep));
+
+   double normalized = MathRound(volume / volStep) * volStep;
+   if(normalized < minVol) normalized = minVol;
+   if(normalized > maxVol) normalized = maxVol;
+
+   return NormalizeDouble(normalized, digits);
+}
 
 //+------------------------------------------------------------------+
 //| Universal Dashboard object UI creator element                    |
